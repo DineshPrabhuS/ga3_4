@@ -11,8 +11,8 @@ API_BASE = os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1").rstrip
 API_KEY = os.environ.get("LLM_API_KEY", "")
 MODEL = os.environ.get("LLM_MODEL", "nvidia/nemotron-3-ultra-550b-a55b:free")
 REASONING_MODEL = bool(re.search(r"(^|/)(gpt-5|o\d)", MODEL))
-PLAN_TIMEOUT = float(os.environ.get("PLAN_TIMEOUT", "15"))       # each request has 18 s
-CONFIRM_TIMEOUT = float(os.environ.get("CONFIRM_TIMEOUT", "7"))
+PLAN_TIMEOUT = float(os.environ.get("PLAN_TIMEOUT", "8"))       # whole verification must fit in 110 s       # each request has 18 s
+CONFIRM_TIMEOUT = float(os.environ.get("CONFIRM_TIMEOUT", "3"))
 MAX_BODY = 4_000_000
 CACHE_V = "i2:"
 
@@ -559,7 +559,8 @@ async def create(req: Request):
         start = now_ns()
         p, c0, c1, cerr, src = await plan(b, secrets_)
         if not p: p = heuristic_plan(b); src = "heuristic"
-        print("PLAN", rid, src, p["rootCause"], p["evidence"], [d["toolName"] for d in p["diagnostics"]], p["effect"]["toolName"])
+        print("PLAN", rid, src, f"{(now_ns()-start)/1e9:.1f}s", "tp" if tp else "no-tp", p["rootCause"], p["evidence"],
+              [(d["toolName"], d["arguments"]) for d in p["diagnostics"]], p["effect"]["toolName"], p["effect"]["arguments"])
         st = {"runId": rid, "reqHash": h, "agentName": b.get("agentName") or "incident-response",
               "publicMarker": b.get("publicMarker") or "", "policy": b.get("policy") or {}, "status": "waiting",
               "diagnosis": {"rootCause": p["rootCause"], "evidence": p["evidence"]}, "plan": p, "start": start, "end": None,
@@ -658,4 +659,6 @@ async def receipts(rid: str, req: Request):
         body = safe_json(view(st, new_d, new_a), secrets_)
         save_state(st)
         run_sql("insert into receipts values(?,?,?,?)", (rid, b["receiptId"], h, body))
+        print("RECEIPT", rid, [(o.get("status"), o.get("resultClass") or o.get("errorType")) for o in b.get("outcomes") or []],
+              [x.get("decision") for x in b.get("approvals") or []], "->", st["status"], [(d["phase"], d["toolName"], d["attempt"]) for d in new_d], len(new_a))
         return Response(body, media_type="application/json")
