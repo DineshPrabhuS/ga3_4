@@ -22,6 +22,7 @@ db.executescript("""
 create table if not exists runs(run_id text primary key, req_hash text, state text);
 create table if not exists receipts(run_id text, receipt_id text, hash text, response text, primary key(run_id, receipt_id));
 create table if not exists cache(k text primary key, v text);
+create table if not exists dumps(k text primary key, created real, v text);
 """)
 dblock = threading.Lock()
 
@@ -525,6 +526,25 @@ app = FastAPI()
 async def health():
     return {"ok": True, "profile": PROFILE, "model": MODEL}
 
+@app.get("/debug/incidents")
+async def debug_incidents(key: str = ""):
+    if not os.environ.get("DEBUG_KEY") or key != os.environ["DEBUG_KEY"]: return err(404, "Not found")
+    with dblock:
+        rows = db.execute("select v from dumps order by created").fetchall()
+    return Response("[" + ",".join(r[0] for r in rows) + "]", media_type="application/json")
+
+@app.get("/debug/runs")
+async def debug_runs(key: str = ""):
+    if not os.environ.get("DEBUG_KEY") or key != os.environ["DEBUG_KEY"]: return err(404, "Not found")
+    with dblock:
+        rows = db.execute("select state from runs").fetchall()
+    out = []
+    for (s_,) in rows:
+        st = json.loads(s_)
+        out.append({"runId": st["runId"], "status": st["status"], "diagnosis": st["diagnosis"],
+                    "actionLog": st["actionLog"], "receiptLog": st["receiptLog"], "initialResponse": json.loads(st["initialResponse"])})
+    return reply(200, out)
+
 @app.get("/selftest")
 async def selftest():
     try:
@@ -552,6 +572,13 @@ async def create(req: Request):
             if old_h != h: return err(409, "runId reused with different content")
             return Response(st["initialResponse"], media_type="application/json")
         secrets_ = sensitive_values(b)
+        try:   # debug copy of the incident for offline tuning (sensitive object removed)
+            dump = {k: v for k, v in b.items() if k != "sensitive"}
+            dump["traceparentHeader"] = req.headers.get("traceparent"); dump["tracestateHeader"] = req.headers.get("tracestate")
+            run_sql("insert or ignore into dumps values(?,?,?)", (content_key(b, secrets_), time.time(),
+                    redact_text(json.dumps(dump, ensure_ascii=False), sorted(secrets_, key=len, reverse=True))))
+        except Exception as e:
+            print("dump error", repr(e)[:100])
         tp = parse_traceparent(req.headers.get("traceparent")) or parse_traceparent(b.get("traceparent"))
         tstate = (req.headers.get("tracestate") or b.get("tracestate")) if tp else None
         if isinstance(tstate, str): tstate = tstate.strip() or None
