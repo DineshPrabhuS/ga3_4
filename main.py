@@ -256,6 +256,7 @@ def fill_args(tool, inc, rc=""):
         v = None
         if "service" in kl: v = inc.get("service")
         elif "incident" in kl: v = inc.get("incidentId")
+        elif "sever" in kl or "priority" in kl: v = inc.get("severity")
         elif re.search(r"deploy|release|version|revision|build", kl):
             v = _most_common([r"\b(?:deploy|dep|rel|release|build|rev)[-_][\w.-]*\d[\w.-]*", r"\bv\d+\.\d+(?:\.\d+)?[\w.-]*"], text)
         elif re.search(r"flag|feature|toggle", kl):
@@ -296,8 +297,14 @@ def heuristic_plan(b):
 bg_tasks = {}
 
 async def full_plan(b, secrets_, key):
-    txt = await llm(plan_prompt(b, secrets_), timeout=60, max_tokens=3000)
-    p = validate_plan(parse_json(txt), b, secrets_)
+    p, txt = None, ""
+    for attempt in range(2):
+        try:
+            txt = await llm(plan_prompt(b, secrets_), timeout=60, max_tokens=3000)
+            p = validate_plan(parse_json(txt), b, secrets_)
+        except ValueError as e:
+            print("PLAN PARSE", repr(e)[:80]); p = None
+        if p: break
     if p: run_sql("insert or replace into cache values(?,?)", (key, json.dumps(p)))
     else: print("PLAN INVALID", txt[:400])
     return p
@@ -499,11 +506,12 @@ def build_otlp(st):
     return {"resourceSpans": [{"resource": {"attributes": attrs({"service.name": st["agentName"], **base})},
                                "scopeSpans": [{"scope": {"name": "ga5-incident-agent", "version": "1.0.0"}, "spans": spans}]}]}
 
-def view(st, dispatches=None, approvals=None):
+def view(st, dispatches=None, approvals=None, full=False):
     out = {"runId": st["runId"], "status": st["status"], "diagnosis": st["diagnosis"]}
     if st["status"] == "waiting":
         out["dispatches"] = dispatches if dispatches is not None else pending_dispatches(st)
         out["approvals"] = approvals if approvals is not None else pending_approvals(st)
+        if not full: return out
     else:
         out["dispatches"] = []; out["approvals"] = []
     out["chosenEffect"] = st.get("chosenEffect")
@@ -608,7 +616,7 @@ async def create(req: Request):
 async def get_run(rid: str):
     _, st = load_state(rid)
     if not st: return err(404, "Unknown run")
-    return Response(safe_json(view(st), set(st.get("secrets") or [])), media_type="application/json")
+    return Response(safe_json(view(st, full=True), set(st.get("secrets") or [])), media_type="application/json")
 
 def validate_receipt(b):
     if not isinstance(b, dict) or not isinstance(b.get("receiptId"), str) or not b["receiptId"].strip(): return "receiptId"
